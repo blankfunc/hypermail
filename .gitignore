@@ -1,0 +1,3 @@
+/target
+/bindgen
+/src/ffi/libuv.rs
