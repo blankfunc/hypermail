@@ -25,5 +25,8 @@ pub mod core;
 pub mod client;
 pub mod server;
 
-#[cfg(target_arch = "wasm32")]
-pub mod js; // 针对 Wasm 的绑定
+#[cfg(test)]
+mod test;
+
+// #[cfg(target_arch = "wasm32")]
+// pub mod js; // 针对 Wasm 的绑定

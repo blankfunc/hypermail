@@ -11,7 +11,7 @@ use forever_safer::atomic_poll::AtomicPoll;
 use ibig::UBig;
 use once_cell::sync::Lazy;
 use capnp::message::ReaderOptions;
-use super::packet::channel_data;
+use super::handler::channel_data;
 
 const READER_OPTIONS: Lazy<ReaderOptions> = Lazy::new(|| ReaderOptions::default());
 
@@ -26,15 +26,21 @@ fn debugger_buffer(buffer: &[u8]) -> String {
 		.join(&"\n")
 }
 
+#[derive(Clone)]
+pub struct ConnectionData {
+	id: u64,
+	buffer: Vec<u8>
+}
+
 // 处理 IO
-async fn io_handler(linkio: Arc<dyn LinkIO>, buffer_cache: Arc<SegQueue<Arc<Vec<u8>>>>, receiver: flume::Receiver<Arc<Vec<u8>>>) {
+pub async fn io_handler(linkio: Arc<dyn LinkIO>, buffer_cache: Arc<SegQueue<Arc<ConnectionData>>>, receiver: flume::Receiver<Arc<Vec<u8>>>) {
 	let writer_stream: DashMap<UBig, Arc<dyn WritterStream>> = DashMap::new();
 	let writer_stream_id = AtomicPoll::new();
 
 	let reader_tasks = FuturesUnordered::new();
 
 	// 处理 Reader
-	fn wrap_reader_stream(cache: Arc<SegQueue<Arc<Vec<u8>>>>, tasks: &FuturesUnordered<JoinHandle<()>>, stream: Arc<dyn ReaderStream>) {
+	fn wrap_reader_stream(cache: Arc<SegQueue<Arc<ConnectionData>>>, tasks: &FuturesUnordered<JoinHandle<()>>, stream: Arc<dyn ReaderStream>) {
 		let task = spawn(async move {
 			let link_id = match stream.link_id() {
 				Ok(id) => id,
@@ -48,9 +54,9 @@ async fn io_handler(linkio: Arc<dyn LinkIO>, buffer_cache: Arc<SegQueue<Arc<Vec<
 
 			loop {
 				// 尝试进行读取
-				match stream.read().await {
+				let data = match stream.read().await {
 					// 成功获取
-					Ok(buffer) => cache.push(Arc::new(buffer)),
+					Ok(buffer) => ConnectionData { id: link_id, buffer: buffer },
 					// 流断连不可用
 					Err(IOError::ClosedStream | IOError::Disconnected) => {
 						log::debug!("The stream {} is disconnected!", link_id);
@@ -62,6 +68,8 @@ async fn io_handler(linkio: Arc<dyn LinkIO>, buffer_cache: Arc<SegQueue<Arc<Vec<
 						continue;
 					}
 				};
+
+				cache.push(Arc::new(data));
 			}
 		});
 
@@ -131,13 +139,15 @@ async fn io_handler(linkio: Arc<dyn LinkIO>, buffer_cache: Arc<SegQueue<Arc<Vec<
 }
 
 // 解析数据
-async fn capnp_handler(buffer_cache: Arc<SegQueue<Arc<Vec<u8>>>>, channel: flume::Sender<channel_data::Data>) {
+pub async fn capnp_handler(buffer_cache: Arc<SegQueue<Arc<ConnectionData>>>, channel: flume::Sender<channel_data::Data>) {
 	loop {
-		if let Some(buffer) = buffer_cache.pop() {
-			log::debug!("Handle received bytes \n({})", debugger_buffer(buffer.as_slice()));
+		if let Some(data) = buffer_cache.pop() {
+			log::debug!("Handle received bytes \n({})", debugger_buffer(data.buffer.as_slice()));
+
+			let connection_id = data.id;
 
 			// 只接受整片
-			let try_message = capnp::serialize::read_message_from_flat_slice_no_alloc(&mut buffer.as_slice(), READER_OPTIONS.clone());
+			let try_message = capnp::serialize::read_message_from_flat_slice_no_alloc(&mut data.buffer.as_slice(), READER_OPTIONS.clone());
 
 			// 解析 Capnp
 			let message = match try_message {
@@ -165,8 +175,8 @@ async fn capnp_handler(buffer_cache: Arc<SegQueue<Arc<Vec<u8>>>>, channel: flume
 			};
 
 
-			use super::packet::handle_packet;
-			match handle_packet(channel.clone(), reader) {
+			use super::handler::handle_packet;
+			match handle_packet(connection_id, channel.clone(), reader) {
 				Ok(()) => {
 					log::debug!("Handle successed.");
 				},
@@ -175,27 +185,5 @@ async fn capnp_handler(buffer_cache: Arc<SegQueue<Arc<Vec<u8>>>>, channel: flume
 				}
 			}
 		}
-	}
-}
-
-pub struct Link {
-
-}
-
-impl Link {
-	pub fn new(linkio: Arc<dyn LinkIO>) -> Self {
-		let buffer_cache = Arc::new(SegQueue::new());
-
-		// IO 消息传递
-		let (io_sender, io_receiver) = flume::unbounded::<Arc<Vec<u8>>>();
-
-		// Packet 内容传递
-		let (channel_sender, channel_receiver) = flume::unbounded::<channel_data::Data>();
-
-		// 处理 IO 的线程
-		spawn(io_handler(linkio, buffer_cache.clone(), io_receiver));
-		spawn(capnp_handler(buffer_cache.clone(), channel_sender));
-
-		Self {}
 	}
 }
