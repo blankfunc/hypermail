@@ -22,14 +22,11 @@ By utilizing this protocol and **reasonable program design**, the following func
 + 💻️ **Cross-Platforms.** The rust + cbindgen approach, combined with a super simple API, makes it easy to integrate with any program.
 
 ## Bindgen
-We have used `UniFFI`, `Diplomat`, and `Wasm-Bindgen` to perform FFI bridging binding on multiple languages.
+We have used `UniFFI` and `Wasm-Bindgen` to perform FFI bridging binding on multiple languages.
 
 + [Kotlin][UniFFI]
 + [Swift][UniFFI]
 + [Python][UniFFI]
 + [Wasm (JS/TS)](https://github.com/rustwasm/wasm-bindgen)
-+ [C/C++](https://github.com/rust-diplomat/diplomat)
-
-> For `C/C++`, you should enable the feature `cbind` or `libuv` (this will compile [libuv](https://github.com/libuv/libuv)).
 
 [UniFFI]: https://github.com/mozilla/uniffi-rs

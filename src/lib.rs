@@ -21,12 +21,9 @@ mod value_capnp {
 uniffi::setup_scaffolding!();
 
 pub mod io;
-pub mod protocol;
+pub mod core;
 pub mod client;
 pub mod server;
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "cbind"))]
-mod ffi; // 针对 C/C++ 的绑定
-
 #[cfg(target_arch = "wasm32")]
-mod js; // 针对 Wasm 的绑定
+pub mod js; // 针对 Wasm 的绑定

@@ -29,22 +29,28 @@ pub enum IOError {
 #[async_trait]
 pub trait LinkIO: Send + Sync {
 	// 打开一个单向流（只写流）
-	async fn open_bi_stream(&self) -> Result<Arc<dyn WritterStream>, IOError>;
+	async fn open_uni_stream(&self) -> Result<Arc<dyn WritterStream>, IOError>;
 
 	// 打开一个双向流
-	async fn open_uni_stream(&self) -> Result<Arc<dyn BidirectionalStream>, IOError>;
+	async fn open_bi_stream(&self) -> Result<Arc<dyn BidirectionalStream>, IOError>;
 
 	// 接收一个单向流（只读流）
-	async fn accept_bi_stream(&self) -> Result<Arc<dyn ReaderStream>, IOError>;
+	async fn accept_uni_stream(&self) -> Result<Arc<dyn ReaderStream>, IOError>;
 
 	// 接收一个双向流
-	async fn accept_uni_stream(&self) -> Result<Arc<dyn BidirectionalStream>, IOError>;
+	async fn accept_bi_stream(&self) -> Result<Arc<dyn BidirectionalStream>, IOError>;
 }
 
 #[uniffi::export]
 #[async_trait]
 pub trait IOStream: Send + Sync {
+	// 获取 stream 的唯一 ID
+	fn link_id(&self) -> Result<u64, IOError>;
+
 	async fn close(&self) -> Result<(), IOError>;
+
+	// 获取是否关闭
+	async fn is_closed(&self) -> bool;
 }
 
 #[uniffi::export]

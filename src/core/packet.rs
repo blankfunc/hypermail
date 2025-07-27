@@ -1,16 +1,156 @@
 use std::{fmt::Debug, sync::Arc};
-use tokio_with_wasm::alias::{
-	sync::mpsc,
-	spawn
-};
-use crate::io::LinkIO;
 use crate::packet_capnp as packet;
 use crate::frame_capnp as frame;
 use crate::value_capnp as value;
-use super::channel_data;
 use thiserror::Error;
 use ibig::UBig;
-use super::proc_convert::ConvertError;
+
+pub mod proc_convert {
+	use crate::value_capnp as value;
+	use ibig::UBig;
+
+	#[derive(Debug, Clone, thiserror::Error)]
+	pub enum ConvertError {
+		#[error(transparent)]
+		CapnpError(#[from] capnp::Error),
+
+		#[error(transparent)]
+		NotInSchema(#[from] capnp::NotInSchema)
+	}
+
+	/// 从 Value.BigUInt (be_bytes) 中读取 UBig
+	pub fn get_ubig<'a>(id: value::big_u_int::Reader<'a>) -> Result<Option<UBig>, ConvertError> {
+		let value = id.get_value().map_err(|err| ConvertError::CapnpError(err))?;
+
+		return Ok(value.as_slice().map(|bytes| UBig::from_be_bytes(bytes)));
+	}
+
+	/// 从 Value.Id 中获取 ID
+	pub fn get_id<'a>(id: value::id::Reader<'a>) -> Result<Option<UBig>, ConvertError> {
+		if let value::id::Which::Value(ubig_result) =
+			id.which().map_err(|err| ConvertError::NotInSchema(err))? {
+			let ubig = ubig_result.map_err(|err| ConvertError::CapnpError(err))?;
+
+			return get_ubig(ubig);
+		}
+
+		return Ok(None);
+	}
+
+	#[derive(Clone)]
+	pub struct Reason {
+		reason_code: u64
+	}
+
+	/// 从 Value.EventReason 中获取原因
+	pub fn get_reason<'a>(reader: value::event_reason::Reader<'a>) -> Result<Reason, ConvertError> {
+		let reason_code = reader.get_reason_code();
+
+		Ok(Reason {
+			reason_code
+		})
+	}
+}
+
+/// 内部传输待处理消息
+pub mod channel_data {
+	use derive_builder::Builder;
+	use super::proc_convert::Reason;
+	use ibig::UBig;
+
+	/// ID
+	#[derive(Clone, Builder)]
+	pub struct PacketId {
+		pub(crate) order_id: UBig,
+		pub(crate) session_id: Option<UBig>,
+		pub(crate) stream_id: Option<UBig>,
+		pub(crate) frame_id: Option<UBig>,
+		pub(crate) block_order_id: Option<UBig>
+	}
+
+	// ReqOptions
+	#[derive(Clone, Builder)]
+	pub struct FrameReqOptions {
+		pub(crate) strong_orderliness: bool,
+		pub(crate) strong_integrity: bool,
+		pub(crate) disposable: bool
+	}
+
+	#[derive(Clone)]
+	pub struct FrameReq {
+		pub(crate) options: FrameReqOptions,
+		pub(crate) length: Option<UBig>
+	}
+
+	/// 外部包裹结构
+	#[derive(Clone)]
+	pub struct WrapData<D> {
+		pub(crate) id: PacketId,
+		pub(crate) data: D
+	}
+
+	#[derive(Debug, Clone, thiserror::Error)]
+	pub enum ThreadError {
+		#[error(transparent)]
+		IO(#[from] crate::io::IOError)
+	}
+
+	#[derive(Debug, Clone, thiserror::Error)]
+	pub enum WhereError {
+		#[error(transparent)]
+		Thread(#[from] ThreadError)
+	}
+
+	// 传输的数据
+	#[derive(Clone)]
+	pub enum Data {
+		// 错误
+		Error(WhereError),
+
+		SessionAccept(WrapData<()>),
+		SessionReject(WrapData<Reason>),
+		SessionClose(WrapData<()>),
+		SessionCloseAck(WrapData<()>),
+		SessionDeath(WrapData<Reason>),
+		StreamAccept(WrapData<()>),
+		StreamReject(WrapData<Reason>),
+		StreamClose(WrapData<()>),
+		StreamCloseAck(WrapData<()>),
+		StreamDeath(WrapData<Reason>),
+		FramePacket(WrapData<Vec<u8>>),
+		FramePacketAck(WrapData<()>),
+		FrameReq(WrapData<FrameReq>),
+		FrameReqAccept(WrapData<()>),
+		FrameReqReject(WrapData<Reason>),
+		FrameBlock(WrapData<Vec<u8>>),
+		FrameBlockAck(WrapData<()>),
+		FrameFlush(WrapData<()>),
+		FrameFlushAck(WrapData<()>),
+		FrameClear(WrapData<Reason>),
+		FrameBlockLater(WrapData<()>),
+		FrameBlockGo(WrapData<()>),
+		FrameBlockLack(WrapData<Vec<UBig>>),
+		FrameReqRetry(WrapData<()>),
+		FrameReqRetryAck(WrapData<Option<Reason>>),
+		HealthPong(WrapData<()>),
+
+		SessionOpen(WrapData<()>),
+		SessionReopen(WrapData<()>),
+		StreamOpen(WrapData<()>),
+		StreamReopen(WrapData<()>),
+		HealthPing(WrapData<()>),
+	}
+
+	// 封装 channel 消息
+	pub fn wrap_channel_data<D>(packet_id: self::PacketId, data: D) -> self::WrapData<D> {
+		self::WrapData {
+			id: packet_id,
+			data
+		}
+	}
+}
+
+use self::proc_convert::ConvertError;
 
 #[derive(Debug, Error, Clone)]
 pub enum SerializeError {
@@ -59,7 +199,7 @@ pub enum PacketError {
 	#[error(transparent)]
 	SerializeError(SerializeError),
 	#[error("An error occurred while transmitting messages through the internal channel: {}", .0)]
-	ChannelError(flume::SendError<super::channel_data::Data>),
+	ChannelError(flume::SendError<self::channel_data::Data>),
 	#[error("Error occurred while encapsulating internal channel message.")]
 	WrapError,
 }
@@ -78,42 +218,7 @@ impl From<flume::SendError<channel_data::Data>> for PacketError {
 	}
 }
 
-#[derive(Clone)]
-pub struct Packet {
-	channel_receiver: flume::Receiver<channel_data::Data>,
-	io_writter: mpsc::UnboundedSender<Vec<u8>>
-}
-
-impl Packet {
-	pub fn new(io: Box<dyn LinkIO>) -> Result<Self, PacketError> {
-		// 这个用于传递封装好的数据
-		let (channel_master, channel_receiver) = flume::unbounded::<channel_data::Data>();
-		// 这个用来向 IO 写入传递的数据
-		let (io_writter, io_listener) = mpsc::unbounded_channel::<Vec<u8>>();
-
-		// 在线程中执行 IO 操作
-		spawn(async move {
-			let sender = channel_master;
-			let receiver = io_listener;
-
-			loop {
-
-			}
-		});
-
-		Ok(Self {
-			channel_receiver,
-			io_writter,
-		})
-	}
-
-	pub fn get_listener(&self) -> flume::Receiver<channel_data::Data> {
-		return self.channel_receiver.clone();
-	}
-}
-
-// 解析传出 Packet 数据（用于分发到不同函数）
-fn handle_packet<'a>(sender: flume::Sender<channel_data::Data>, reader: packet::packet::Reader<'a>) -> Result<(), PacketError> {
+pub fn handle_packet<'a>(sender: flume::Sender<channel_data::Data>, reader: packet::packet::Reader<'a>) -> Result<(), PacketError> {
 	let head = reader.get_head()
 		.map_err(|err| SerializeError::InvalidHead(err))?;
 
@@ -121,7 +226,7 @@ fn handle_packet<'a>(sender: flume::Sender<channel_data::Data>, reader: packet::
 	let (order_id, try_session_id, try_stream_id, try_frame_id) = {
 		// 封装 get_id 的错误
 		fn get_id<'a>(id: value::id::Reader<'a>) -> Result<Option<UBig>, PacketError> {
-			let result = super::proc_convert::get_id(id)
+			let result = self::proc_convert::get_id(id)
 			.map_err(|err| SerializeError::ConvertError(err));
 
 			Ok(result?)
@@ -129,7 +234,7 @@ fn handle_packet<'a>(sender: flume::Sender<channel_data::Data>, reader: packet::
 
 		// 再次封装 get_id，方便后续判断是否需要对应 id
 		fn try_get_id<'a>(id: value::id::Reader<'a>, err: SerializeError) -> Result<Result<UBig, PacketError>, PacketError> {
-			let result =  super::proc_convert::get_id(id)
+			let result =  self::proc_convert::get_id(id)
 			.map_err(|err| SerializeError::ConvertError(err))?
 			.ok_or(PacketError::SerializeError(err));
 
@@ -202,12 +307,12 @@ fn handle_packet<'a>(sender: flume::Sender<channel_data::Data>, reader: packet::
 
 	use packet::Head;
 	use packet::packet_payload::*;
-	use super::proc_convert::Reason;
-	use super::channel_data::{self, Data, wrap_channel_data};
+	use self::proc_convert::Reason;
+	use self::channel_data::{self, Data, wrap_channel_data};
 
 	// 封装 get_reason
 	fn get_reason<'a>(reader: value::event_reason::Reader<'a>) -> Result<Reason, PacketError> {
-		let result =  super::proc_convert::get_reason(reader)
+		let result =  self::proc_convert::get_reason(reader)
 			.map_err(|err| SerializeError::InvalidReason(err));
 
 		Ok(result?)
@@ -270,7 +375,7 @@ fn handle_packet<'a>(sender: flume::Sender<channel_data::Data>, reader: packet::
 	// 快速拿到 Block 的 OrderId
 	macro_rules! block_order_id {
 		($name:ident) => {{
-			use super::proc_convert::get_ubig;
+			use self::proc_convert::get_ubig;
 			let order_reader = $name.get_order().map_err(|err| SerializeError::InvalidBlockOrderId(Some(err)))?;
 			let order = get_ubig(order_reader).map_err(|err| SerializeError::ConvertError(err))?;
 			order.ok_or(SerializeError::InvalidBlockOrderId(None))?
@@ -279,6 +384,7 @@ fn handle_packet<'a>(sender: flume::Sender<channel_data::Data>, reader: packet::
 
 	match head {
 		Head::SessionAccept => {
+			// 对方接受了创建/重连 Session
 			let _ = try_session_id?;
 			non_payload!(SessionAccept);
 		},
@@ -292,33 +398,42 @@ fn handle_packet<'a>(sender: flume::Sender<channel_data::Data>, reader: packet::
 			non_payload!(SessionClose);
 		},
 		Head::SessionCloseAck => {
+			// 对方收到了关闭请求
 			let _ = try_session_id?;
 			non_payload!(SessionCloseAck);
 		},
 		Head::SessionDeath => {
 			// 对方强制关闭了连接
+			let _ = try_session_id?;
 			payload_reason!(SessionDeath);
 		},
 		Head::StreamAccept => {
+			// 对方接受了创建/重连 Stream
 			let _ = try_stream_id?;
 			non_payload!(StreamAccept);
 		},
 		Head::StreamReject => {
+			// 对方拒绝创建/重连 Stream
 			payload_reason!(StreamReject);
 		},
 		Head::StreamClose => {
+			// 对方请求关闭 Stream
 			let _ = try_stream_id?;
 			non_payload!(StreamClose);
 		},
 		Head::StreamCloseAck => {
+			// 对方收到了关闭请求
 			let _ = try_stream_id?;
 			non_payload!(StreamCloseAck);
 		},
 		Head::StreamDeath => {
+			// 对方强制关闭了 Stream
 			let _ = try_stream_id?;
 			payload_reason!(StreamDeath);
 		},
 		Head::FramePacket => {
+			// 整包数据
+			let _ = try_stream_id?;
 			with_payload!(FramePacket, |reader| {
 				let bytes = payload_data!(reader);
 				let data = Data::FramePacket(wrap_channel_data(packet_id!(), bytes));
@@ -326,11 +441,16 @@ fn handle_packet<'a>(sender: flume::Sender<channel_data::Data>, reader: packet::
 			});
 		},
 		Head::FramePacketAck => {
+			// 对方收到了整包数据
+			let _ = try_stream_id?;
 			non_payload!(FramePacketAck);
 		},
 		Head::FrameReq => {
+			// 对方请求创建写入流
+			let _ = try_stream_id?;
 			with_payload!(FrameReq, |reader| {
-				use super::channel_data::{FrameReqOptionsBuilder, FrameReq};
+				use self::channel_data::{FrameReqOptionsBuilder, FrameReq};
+
 				let options_reader = reader.get_options().map_err(|err| SerializeError::InvalidReqOptions(err))?;
 				let mut options_builder = FrameReqOptionsBuilder::default();
 				let options = options_builder
@@ -339,6 +459,7 @@ fn handle_packet<'a>(sender: flume::Sender<channel_data::Data>, reader: packet::
 					.disposable(options_reader.get_disposable())
 					.build()
 					.map_err(|_| PacketError::WrapError)?;
+
 				let length_reader = reader.get_length().map_err(|err| SerializeError::InvalidReqLength(err))?;
 				let length = length_reader.get_value()
 					.map_err(|err| SerializeError::InvalidReqLength(err))?
@@ -360,6 +481,8 @@ fn handle_packet<'a>(sender: flume::Sender<channel_data::Data>, reader: packet::
 			non_payload!(FrameReqAccept);
 		},
 		Head::FrameReqReject => {
+			// 拒绝发送连续块
+			let _ = try_stream_id?;
 			payload_reason!(FrameReqReject);
 		},
 		Head::FrameBlock => {
@@ -376,6 +499,7 @@ fn handle_packet<'a>(sender: flume::Sender<channel_data::Data>, reader: packet::
 			});
 		},
 		Head::FrameBlockAck => {
+			// 对方收到了分块的其中一个块
 			let _ = try_frame_id?;
 			with_payload!(FrameBlockAck, |reader| {
 				let order_id = block_order_id!(reader);
@@ -386,10 +510,12 @@ fn handle_packet<'a>(sender: flume::Sender<channel_data::Data>, reader: packet::
 			});
 		},
 		Head::FrameFlush => {
+			// 发送连续块的结束
 			let _ = try_frame_id?;
 			non_payload!(FrameFlush);
 		},
 		Head::FrameFlushAck => {
+			// 对方收到了发送连续块的结束
 			let _ = try_frame_id?;
 			non_payload!(FrameFlushAck);
 		},
@@ -409,9 +535,12 @@ fn handle_packet<'a>(sender: flume::Sender<channel_data::Data>, reader: packet::
 			non_payload!(FrameBlockGo);
 		},
 		Head::FrameBlockLack => {
+			// 对方请求缺失的分块
 			let _ = try_frame_id?;
 			with_payload!(FrameBlockLack, |reader| {
-				use super::proc_convert::get_ubig;
+				use self::proc_convert::get_ubig;
+
+				// 获取缺失分块的内容
 				let orders_reader = reader.get_orders().map_err(|err| SerializeError::InvalidLackOrderIds(err))?;
 				let mut order_ids = vec![];
 				for reader in orders_reader.iter() {
@@ -420,6 +549,7 @@ fn handle_packet<'a>(sender: flume::Sender<channel_data::Data>, reader: packet::
 						.ok_or(SerializeError::InvalidLackOrderId(None))?;
 					order_ids.push(order_id);
 				}
+
 				let data = Data::FrameBlockLack(wrap_channel_data(packet_id!(), order_ids));
 				boradcast(data)?;
 			});
@@ -430,10 +560,12 @@ fn handle_packet<'a>(sender: flume::Sender<channel_data::Data>, reader: packet::
 			non_payload!(FrameReqRetry);
 		},
 		Head::FrameReqRetryAck => {
+			// 对方响应重新传输请求
 			let _ = try_frame_id?;
 			with_payload!(FrameReqRetryAck, |reader| {
 				use frame::req_retry_ack;
 
+				// 是否允许
 				let is_accept = reader.get_accept();
 				let mut reason: Option<Reason> = None;
 
@@ -454,12 +586,27 @@ fn handle_packet<'a>(sender: flume::Sender<channel_data::Data>, reader: packet::
 			non_payload!(HealthPong);
 		},
 		// 专属于服务端的协议头
-		  Head::SessionOpen
-		| Head::SessionReopen
-		| Head::StreamOpen
-		| Head::StreamReopen
-		| Head::HealthPing => {
-			return Err(PacketError::SerializeError(SerializeError::UnexpectedHead { head: format!("{:?}", head) }));
+		Head::SessionOpen => {
+			// 请求创建会话
+			non_payload!(SessionOpen);
+		},
+		Head::SessionReopen => {
+			// 请求重连会话
+			non_payload!(SessionReopen);
+		},
+		Head::StreamOpen => {
+			// 请求创建 Stream
+			let _ = try_session_id?;
+			non_payload!(StreamOpen);
+		},
+		Head::StreamReopen => {
+			// 请求重连 Stream
+			let _ = try_session_id?;
+			non_payload!(StreamReopen);
+		},
+		Head::HealthPing => {
+			// 客户端发送心跳包
+			non_payload!(HealthPing);
 		}
 	};
 
