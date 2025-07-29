@@ -1,0 +1,80 @@
+include "session.fbs";
+include "stream.fbs";
+include "health.fbs";
+include "value.fbs";
+
+namespace Packet;
+
+table None {}
+
+union Id {
+	None,
+	Value.UBig
+}
+
+table PacketId {
+	link_id: uint64;
+	event_id: Id;
+	session_id: Id;
+	stream_id: Id;
+}
+
+enum Head: ubyte {
+	SessionOpen,		// 尝试请求打开会话
+	SessionOpenAck,		// 响应会话创建情况
+	SessionReopen,		// 尝试请求重连
+	SessionReopenAck,	// 响应是否允许重连
+	SessionClose,		// 请求对方关闭会话
+	SessionCloseAck,	// 响应是否准备关闭
+	SessionDeath,		// 强制关闭会话
+
+	StreamBlock,		// 整包数据
+	StreamBlockAck,		// 响应已接收整包数据
+	StreamOpen,			// 请求创建流
+	StreamOpenAck,		// 响应是否允许创建流
+	StreamReopen,		// 请求重连流
+	StreamReopenAck,	// 响应是否允许重连流
+	StreamChunk,		// 在流上发送分块数据
+	StreamChunkAck,		// 分块数据接收回应
+	StreamFlush,		// 告知发送完成
+	StreamFlushAck,		// 对方响应全部接收
+	StreamLack,			// 对方响应缺失数据
+	StreamLater,		// 对方请求延迟发送
+	StreamGo,			// 对方请求继续发送
+	StreamClear,		// 异常结束流
+
+	HealthPing,			// Client 心跳包
+	HealthPong,			// Server 响应心跳包
+}
+
+union Payload {
+	None,
+
+	Session.Open,
+	Session.OpenAck,
+	Session.ReopenAck,
+	Session.CloseAck,
+	Session.Death,
+
+	Stream.Block,
+	Stream.Open,
+	Stream.OpenAck,
+	Stream.ReopenAck,
+	Stream.Chunk,
+	Stream.ChunkAck,
+	Stream.Flush,
+	Stream.Lack,
+	Stream.Clear,
+}
+
+table Packet {
+	head: Head;
+	id: PacketId (required);
+	payload: Payload (required);
+}
+
+table MutPacket {
+	batch: [Packet];
+}
+
+root_type Packet;

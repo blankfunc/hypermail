@@ -1,0 +1,31 @@
+namespace Value;
+
+table Bytes {
+	bytes: [ubyte];
+}
+
+table UInt64 {
+	uint: uint64;
+}
+
+// 切换机制
+union UBigUnion {
+	UInt64,
+	Bytes
+}
+
+table UBig {
+	from: UBigUnion (required);
+}
+
+table Reason {
+	code: uint64;
+}
+
+union Response {
+	Accept,
+	Reject
+}
+
+table Accept {}
+table Reject { reason: Reason; }

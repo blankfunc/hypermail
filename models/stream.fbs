@@ -1,0 +1,55 @@
+include "value.fbs";
+
+namespace Stream;
+
+table Block {
+	// 是否需要 Ack 回应
+	ask_response: bool = false;
+	data: [ubyte];
+}
+
+// 创建流的配置
+table OpenOptions {
+	// 是否允许重连
+	allow_reconnect: bool = true;
+	// 强制顺序性 - 必须要 Ack 回复
+	enforce_orderliness: bool = false;
+	// 强制完整性 
+	enforce_integrity: bool = true;
+}
+
+table Open {
+	options: OpenOptions;
+	// 发送的数量
+	length: Value.UBig;
+}
+
+table OpenAck {
+	response: Value.Response (required);
+}
+
+table ReopenAck {
+	response: Value.Response (required);
+}
+
+table Chunk {
+	order: Value.UBig (required);
+	data: [ubyte];
+}
+
+table ChunkAck {
+	order: Value.UBig (required);
+}
+
+table Flush {
+	// 发送的数量
+	length: Value.UBig (required);
+}
+
+table Lack {
+	orders: [Value.UBig];
+}
+
+table Clear {
+	reason: Value.Reason (required);
+}

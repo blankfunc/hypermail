@@ -45,7 +45,7 @@ pub trait LinkIO: Send + Sync {
 #[async_trait]
 pub trait IOStream: Send + Sync {
 	// 获取 stream 的唯一 ID
-	fn link_id(&self) -> Result<u64, IOError>;
+	fn link_id(&self) -> u64;
 
 	async fn close(&self) -> Result<(), IOError>;
 
@@ -64,7 +64,7 @@ pub trait ReaderStream: IOStream {
 #[async_trait]
 pub trait WritterStream: IOStream {
 	/// Write a portion of the continuous data stream into the connection.
-	async fn write(&self, buffer: Vec<u8>) -> Result<(), IOError>;
+	async fn write(&self, buffer: &Vec<u8>) -> Result<(), IOError>;
 }
 
 #[uniffi::export]

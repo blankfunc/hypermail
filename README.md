@@ -20,13 +20,3 @@ By utilizing this protocol and **reasonable program design**, the following func
 + 🚀 **High-Performance.** Regardless of the underlying protocol, it can always maximize the performance and characteristics of the protocol.
 + 🧷 **Integrity.** Complete data will not be lost due to packet loss caused by disconnection, reconnection, or network turbulence.
 + 💻️ **Cross-Platforms.** The rust + cbindgen approach, combined with a super simple API, makes it easy to integrate with any program.
-
-## Bindgen
-We have used `UniFFI` and `Wasm-Bindgen` to perform FFI bridging binding on multiple languages.
-
-+ [Kotlin][UniFFI]
-+ [Swift][UniFFI]
-+ [Python][UniFFI]
-+ [Wasm (JS/TS)](https://github.com/rustwasm/wasm-bindgen)
-
-[UniFFI]: https://github.com/mozilla/uniffi-rs

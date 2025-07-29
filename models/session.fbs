@@ -1,0 +1,37 @@
+include "value.fbs";
+
+namespace Session;
+
+enum SessionWays: ubyte {
+	OnlyRead,	// 只读
+	OnlyWrite,	// 只写
+	TwoWays,	// 双向
+}
+
+// 会话配置
+table OpenOptions {
+	// 方向
+	way: SessionWays = TwoWays;
+	// 是否需要重连
+	allow_reconnect: bool = true;
+}
+
+table Open {
+	options: OpenOptions;
+}
+
+table OpenAck {
+	response: Value.Response (required);
+}
+
+table ReopenAck {
+	response: Value.Response (required);
+}
+
+table CloseAck {
+	response: Value.Response (required);
+}
+
+table Death {
+	reason: Value.Reason (required);
+}
