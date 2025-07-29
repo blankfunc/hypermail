@@ -668,6 +668,21 @@ pub fn serialize_datagram<'a>(builder: &mut flatbuffers::FlatBufferBuilder<'a>, 
 	packet
 }
 
+pub fn serialize_datagrams<'a>(builder: &mut flatbuffers::FlatBufferBuilder<'a>, datas: Vec<self::channel::Datagram>) -> flatbuffers::WIPOffset<protocol::packet::MutPacket<'a>> {
+	use protocol::packet::MutPacketBuilder;
+
+	let packets = datas
+		.iter()
+		.map(|data| serialize_datagram(builder, data.clone()))
+		.collect::<Vec<_>>();
+
+	let batch = builder.create_vector(&packets);
+
+	let mut builder = MutPacketBuilder::new(builder);
+	builder.add_batch(batch);
+	builder.finish()
+}
+
 #[derive(Clone)]
 pub struct Reason {
 	pub code: u64,
