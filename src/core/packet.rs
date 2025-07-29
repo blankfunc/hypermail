@@ -455,16 +455,11 @@ pub fn handle_flatbuffer<'a>(packet: crate::protocol::packet::Packet<'a>, link_i
 	None
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum SerializeError {
-	#[error("")]
-	InvalidEvent
-}
 
 const EVENT_ID: Lazy<AtomicPoll> = Lazy::new(|| AtomicPoll::new());
 const U64_MAX: Lazy<UBig> = Lazy::new(|| UBig::from(u64::MAX));
 
-pub fn serialize_datagram<'a>(builder: &mut flatbuffers::FlatBufferBuilder<'a>, data: self::channel::Datagram) -> Result<flatbuffers::WIPOffset<protocol::packet::Packet<'a>>, SerializeError> {
+pub fn serialize_datagram<'a>(builder: &mut flatbuffers::FlatBufferBuilder<'a>, data: self::channel::Datagram) -> flatbuffers::WIPOffset<protocol::packet::Packet<'a>> {
 	use flatbuffers::{FlatBufferBuilder, WIPOffset, UnionWIPOffset, Vector};
 
 	let id = {
@@ -622,6 +617,8 @@ pub fn serialize_datagram<'a>(builder: &mut flatbuffers::FlatBufferBuilder<'a>, 
 		Ok(())
 	}
 
+	let (head, (payload_type, payload)) = serialize_event(builder, data.event);
+
 	let packet_id = {
 		use protocol::packet::{PacketIdBuilder, Id};
 		fn impl_id<'a>(builder: &mut FlatBufferBuilder<'a>, my_id: Option<UBig>) -> (Id, WIPOffset<UnionWIPOffset>) {
@@ -660,12 +657,15 @@ pub fn serialize_datagram<'a>(builder: &mut flatbuffers::FlatBufferBuilder<'a>, 
 		use protocol::packet::PacketBuilder;
 
 		let mut packet_builder = PacketBuilder::new(builder);
+		packet_builder.add_head(head);
 		packet_builder.add_id(packet_id);
+		packet_builder.add_payload_type(payload_type);
+		packet_builder.add_payload(payload);
 
 		packet_builder.finish()
 	};
 
-	Ok(packet)
+	packet
 }
 
 #[derive(Clone)]
