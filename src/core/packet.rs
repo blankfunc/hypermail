@@ -496,14 +496,14 @@ pub fn serialize_datagram<'a>(builder: &mut flatbuffers::FlatBufferBuilder<'a>, 
 	}
 	
 	// 快速生成 Response
-	fn handle_response<'a>(builder: &mut FlatBufferBuilder<'a>, acceptable: super::strategy::Acceptable) -> (protocol::value::Response, Option<WIPOffset<UnionWIPOffset>>) {
+	fn handle_response<'a>(builder: &mut FlatBufferBuilder<'a>, acceptable: super::strategy::Acceptable) -> (protocol::value::Response, WIPOffset<UnionWIPOffset>) {
 		use super::strategy::Acceptable;
 		use crate::protocol::value::{AcceptBuilder, RejectBuilder, Response};
 		match acceptable {
 			Acceptable::Accept => {
 				let accept = AcceptBuilder::new(builder).finish();
 
-				(Response::Accept, Some(accept.as_union_value()))
+				(Response::Accept, accept.as_union_value())
 			},
 			Acceptable::Reject(my_reason) => {
 				let reason = handle_reason(builder, my_reason);
@@ -511,35 +511,38 @@ pub fn serialize_datagram<'a>(builder: &mut flatbuffers::FlatBufferBuilder<'a>, 
 				reject_builder.add_reason(reason);
 				let reject = reject_builder.finish();
 
-				(Response::Reject, Some(reject.as_union_value()))
+				(Response::Reject, reject.as_union_value())
 			},
 		}
 	}
 
 	// 生成 UBig
-	fn handle_ubig<'a>(builder: &mut FlatBufferBuilder<'a>, value: UBig) -> WIPOffset<UnionWIPOffset> {
+	fn handle_ubig<'a>(builder: &mut FlatBufferBuilder<'a>, may_value: Option<UBig>) -> WIPOffset<protocol::value::UBig<'a>> {
 		use protocol::value::{UBigBuilder, UBigUnion, UInt64Builder, BytesBuilder};
-		let (from_type, from) = if value > U64_MAX.clone() {
-			let the_bytes = builder.create_vector(&value.to_be_bytes());
-			let mut bytes_builder = BytesBuilder::new(builder);
-			bytes_builder.add_bytes(the_bytes);
-			let bytes = bytes_builder.finish();
-
-			(UBigUnion::Bytes, bytes.as_union_value())
-		} else {
+		let (from_type, from) = if let Some(value) = may_value.clone() && value <= U64_MAX.clone() {
 			let number = u64::try_from(value).unwrap();
 			let mut uint64_builder = UInt64Builder::new(builder);
 			uint64_builder.add_uint(number);
 			let uint64 = uint64_builder.finish();
 
 			(UBigUnion::UInt64, uint64.as_union_value())
+		} else {
+			let my_bytes = may_value
+				.map(|v| v.to_be_bytes())
+				.unwrap_or(vec![]);
+			let the_bytes = builder.create_vector(&my_bytes);
+			let mut bytes_builder = BytesBuilder::new(builder);
+			bytes_builder.add_bytes(the_bytes);
+			let bytes = bytes_builder.finish();
+
+			(UBigUnion::Bytes, bytes.as_union_value())
 		};
 
 		let mut ubig_builder = UBigBuilder::new(builder);
 		ubig_builder.add_from_type(from_type);
 		ubig_builder.add_from(from);
 
-		ubig_builder.finish().as_union_value()
+		ubig_builder.finish()
 	}
 	
 	// 生成 UBytes
@@ -551,6 +554,19 @@ pub fn serialize_datagram<'a>(builder: &mut flatbuffers::FlatBufferBuilder<'a>, 
 	use protocol::packet::{Head, Payload};
 
 	fn serialize_event<'a>(builder: &mut flatbuffers::FlatBufferBuilder<'a>, event: WrapEvent) -> (Head, (Payload, WIPOffset<UnionWIPOffset>)) {
+		// 快速生成封装 Response
+		macro_rules! quickly_response {
+			($name:ident, $acceptable:ident) => {
+				{
+					let (response_type, response) = handle_response(builder, $acceptable);
+					let mut builder = $name::new(builder);
+					builder.add_response_type(response_type);
+					builder.add_response(response);
+					builder.finish().as_union_value()
+				}
+			};
+		}
+
 		match event {
 			WrapEvent::Link(event) => {
 				use self::channel::link::{Event, Health};
@@ -562,22 +578,76 @@ pub fn serialize_datagram<'a>(builder: &mut flatbuffers::FlatBufferBuilder<'a>, 
 					Event::StreamAck(the_event) => {
 						return serialize_event(builder, WrapEvent::Stream(the_event));
 					},
-					Event::Health(health) => todo!(),
+					Event::Health(health) => {
+						match health {
+							Health::Ping => {
+								return (Head::HealthPing, quickly_none_payload(builder));
+							},
+							Health::Pong => {
+								return (Head::HealthPong, quickly_none_payload(builder));
+							},
+						}
+					},
 				}
 			},
 			WrapEvent::Session(event) => {
-				use self::channel::session::Event;
+				use self::channel::session::{Event, OpenOptions, Ways};
 
 				match event {
-					Event::Open(open_options) => todo!(),
+					Event::Open(open_options) => {
+						use protocol::session::{OpenBuilder, OpenOptionsBuilder, SessionWays};
+						let way = match open_options.way {
+							Ways::OnlyRead => SessionWays::OnlyRead,
+							Ways::OnlyWrite => SessionWays::OnlyWrite,
+							Ways::TwoWays => SessionWays::TwoWays,
+						};
+
+						let mut options_builder = OpenOptionsBuilder::new(builder);
+						options_builder.add_way(way);
+						options_builder.add_allow_reconnect(open_options.allow_reconnect);
+						let options = options_builder.finish();
+
+						let mut builder = OpenBuilder::new(builder);
+						builder.add_options(options);
+						let open = builder.finish().as_union_value();
+						return (Head::SessionOpen, (Payload::Session_Open, open));
+					},
 					Event::OpenAck(acceptable) => {
+						use protocol::session::OpenAckBuilder;
+						let ack = quickly_response!(OpenAckBuilder, acceptable);
+
+						return (Head::SessionOpenAck, (Payload::Session_OpenAck, ack));
 					},
 					Event::Reopen => {
+						return (Head::SessionReopen, quickly_none_payload(builder));
 					},
-					Event::ReopenAck(acceptable) => todo!(),
-					Event::Close => todo!(),
-					Event::CloseAck(acceptable) => todo!(),
-					Event::Death(reason) => todo!(),
+					Event::ReopenAck(acceptable) => {
+						use protocol::session::ReopenAckBuilder;
+						let ack = quickly_response!(ReopenAckBuilder, acceptable);
+
+						return (Head::SessionReopenAck, (Payload::Session_ReopenAck, ack));
+					},
+					Event::Close => {
+						return (Head::SessionClose, quickly_none_payload(builder));
+					},
+					Event::CloseAck(acceptable) => {
+						use protocol::session::CloseAckBuilder;
+						let ack = quickly_response!(CloseAckBuilder, acceptable);
+
+						return (Head::SessionCloseAck, (Payload::Session_CloseAck, ack));
+					},
+					Event::Death(reason) => {
+						use protocol::{session::DeathBuilder, value::ReasonBuilder};
+						let mut reason_builder = ReasonBuilder::new(builder);
+						reason_builder.add_code(reason.code);
+						let reason = reason_builder.finish();
+
+						let mut death_builder = DeathBuilder::new(builder);
+						death_builder.add_reason(reason);
+						let death = death_builder.finish().as_union_value();
+
+						return (Head::SessionDeath, (Payload::Session_Death, death))
+					},
 				}
 			},
 			WrapEvent::Stream(event) => {
@@ -597,24 +667,112 @@ pub fn serialize_datagram<'a>(builder: &mut flatbuffers::FlatBufferBuilder<'a>, 
 						
 						return (Head::StreamBlock, (Payload::Stream_Block, payload));
 					},
-					Event::BlockAck => todo!(),
-					Event::Open { options, length } => todo!(),
-					Event::OpenAck(acceptable) => todo!(),
-					Event::Reopen => todo!(),
-					Event::ReopenAck(acceptable) => todo!(),
-					Event::Chunk(chunk) => todo!(),
-					Event::ChunkAck(chunk_ack) => todo!(),
-					Event::Flush(flush) => todo!(),
-					Event::FlushAck => todo!(),
-					Event::Lack(lack) => todo!(),
-					Event::Later => todo!(),
-					Event::Go => todo!(),
-					Event::Clear(reason) => todo!(),
+					Event::BlockAck => {
+						return (Head::StreamBlockAck, quickly_none_payload(builder));
+					},
+					Event::Open { options, length } => {
+						use protocol::stream::{OpenOptionsBuilder, OpenBuilder};
+						let mut options_builder = OpenOptionsBuilder::new(builder);
+						options_builder.add_allow_reconnect(options.allow_reconnect);
+						options_builder.add_enforce_integrity(options.enforce_integrity);
+						options_builder.add_enforce_orderliness(options.enforce_orderliness);
+						let options = options_builder.finish();
+
+						let length = handle_ubig(builder, length);
+
+						let mut open_builder = OpenBuilder::new(builder);
+						open_builder.add_options(options);
+						open_builder.add_length(length);
+						let open = open_builder.finish().as_union_value();
+
+						return (Head::StreamOpen, (Payload::Stream_Open, open));
+					},
+					Event::OpenAck(acceptable) => {
+						use protocol::stream::OpenAckBuilder;
+						let ack = quickly_response!(OpenAckBuilder, acceptable);
+
+						return (Head::StreamOpenAck, (Payload::Stream_OpenAck, ack));
+					},
+					Event::Reopen => {
+						return (Head::StreamReopen, quickly_none_payload(builder));
+					},
+					Event::ReopenAck(acceptable) => {
+						use protocol::stream::ReopenAckBuilder;
+						let ack = quickly_response!(ReopenAckBuilder, acceptable);
+
+						return (Head::StreamReopenAck, (Payload::Stream_ReopenAck, ack));
+					},
+					Event::Chunk(chunk) => {
+						use protocol::stream::ChunkBuilder;
+
+						let data = builder.create_vector(&chunk.data);
+						let order = handle_ubig(builder, Some(chunk.order));
+						let mut chunk_builder = ChunkBuilder::new(builder);
+						chunk_builder.add_data(data);
+						chunk_builder.add_order(order);
+						let chunk = chunk_builder.finish().as_union_value();
+						
+						return (Head::StreamChunk, (Payload::Stream_Chunk, chunk));
+					},
+					Event::ChunkAck(chunk_ack) => {
+						use protocol::stream::ChunkAckBuilder;
+
+						let order = handle_ubig(builder, Some(chunk_ack.order));
+						let mut ack_builder = ChunkAckBuilder::new(builder);
+						ack_builder.add_order(order);
+						let ack = ack_builder.finish().as_union_value();
+						
+						return (Head::StreamChunkAck, (Payload::Stream_ChunkAck, ack));
+					},
+					Event::Flush(flush) => {
+						use protocol::stream::FlushBuilder;
+
+						let length = handle_ubig(builder, Some(flush.length));
+						let mut flush_builder = FlushBuilder::new(builder);
+						flush_builder.add_length(length);
+						let flush = flush_builder.finish().as_union_value();
+
+						return (Head::StreamFlush, (Payload::Stream_Flush, flush));
+					},
+					Event::FlushAck => {
+						return (Head::StreamFlushAck, quickly_none_payload(builder));
+					},
+					Event::Lack(lack) => {
+						use protocol::stream::LackBuilder;
+
+						let my_orders = lack.orders
+							.iter()
+							.map(|order| handle_ubig(builder, Some(order.clone())))
+							.collect::<Vec<_>>();
+						let orders = builder.create_vector(&my_orders);
+
+						let mut lack_builder = LackBuilder::new(builder);
+						lack_builder.add_orders(orders);
+						let lack = lack_builder.finish().as_union_value();
+
+						return (Head::StreamLack, (Payload::Stream_Lack, lack));
+					},
+					Event::Later => {
+						return (Head::StreamLater, quickly_none_payload(builder));
+					},
+					Event::Go => {
+						return (Head::StreamGo, quickly_none_payload(builder));
+					},
+					Event::Clear(reason) => {
+						use protocol::{stream::ClearBuilder, value::ReasonBuilder};
+						let mut reason_builder = ReasonBuilder::new(builder);
+						reason_builder.add_code(reason.code);
+						let reason = reason_builder.finish();
+
+						let mut clear_builder = ClearBuilder::new(builder);
+						clear_builder.add_reason(reason);
+						let clear = clear_builder.finish().as_union_value();
+
+						return (Head::StreamClear, (Payload::Stream_Clear, clear))
+					},
 				}
 			}
-		}
-
-		Ok(())
+		};
 	}
 
 	let (head, (payload_type, payload)) = serialize_event(builder, data.event);
@@ -624,7 +782,7 @@ pub fn serialize_datagram<'a>(builder: &mut flatbuffers::FlatBufferBuilder<'a>, 
 		fn impl_id<'a>(builder: &mut FlatBufferBuilder<'a>, my_id: Option<UBig>) -> (Id, WIPOffset<UnionWIPOffset>) {
 			use protocol::packet::NoneBuilder;
 			if let Some(the_id) = my_id {
-				(Id::Value_UBig, handle_ubig(builder, the_id))
+				(Id::Value_UBig, handle_ubig(builder, Some(the_id)).as_union_value())
 			} else {
 				(Id::None, NoneBuilder::new(builder).finish().as_union_value())
 			}
