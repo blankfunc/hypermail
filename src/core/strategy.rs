@@ -10,8 +10,8 @@ pub enum Acceptable {
 #[async_trait::async_trait]
 pub trait Strategy {
 	/// The other party requests to open a new session.
-	async fn ack_session_open() -> Acceptable;
+	async fn ack_session_open(&self) -> Acceptable;
 
 	/// The other party requests to open a new stream.
-	async fn ack_stream_open() -> Acceptable;
+	async fn ack_stream_open(&self) -> Acceptable;
 }

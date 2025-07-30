@@ -1,5 +1,4 @@
 use crate::io::LinkIO;
-use crate::protocol;
 use std::{sync::{atomic::AtomicBool, Arc}, vec};
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -12,6 +11,7 @@ use tokio_with_wasm::alias::{
 use ibig::UBig;
 use thiserror::Error;
 
+use super::strategy::Strategy;
 use super::packet::{channel, handle_flatbuffer};
 
 #[derive(Debug, Error)]
@@ -48,10 +48,12 @@ pub struct InnerContext {
 
 #[derive(Clone)]
 pub struct Link {
+	mode: LinkMode,
 	channel: InnerChannel,
 	context: InnerContext
 }
 
+#[derive(Clone)]
 pub enum LinkMode {
 	Server,
 	Client
@@ -63,7 +65,7 @@ pub enum ModeSession {
 }
 
 impl Link {
-	pub fn new(io: Arc<dyn LinkIO>, mode: LinkMode) -> Self {
+	pub fn new(io: Arc<dyn LinkIO>, mode: LinkMode, strategy: Arc<dyn Strategy>) -> Self {
 		let runtime = Arc::new(LocalSet::new());
 
 		// 建立内部数据交换通道
@@ -92,8 +94,56 @@ impl Link {
 		runtime.spawn_local(link_handler(channel.clone(), io_sender, context.clone()));
 
 		Self {
+			mode,
 			channel,
 			context
+		}
+	}
+
+	pub async fn wait_session(&self) {
+		
+	}
+
+	pub async fn create_session(&self, options: channel::session::OpenOptions) {
+		use super::packet::get_event_id;
+		use super::strategy::Acceptable;
+		use channel::{Datagram, Event as WrapEvent, link::Event as LinkEvent, session::Event, IdSet};
+
+		let channel = self.channel.clone();
+		let sender = channel.get_sender();
+		let event_id = get_event_id();
+		let data = Datagram {
+			id: IdSet {
+				event: Some(event_id.clone()),
+				session: None,
+				stream: None,
+			},
+			event: WrapEvent::Link(LinkEvent::SessionAck(Event::Open(options)))
+		};
+		sender.send(data).unwrap();
+
+		let mut receiver = channel.get_receiver();
+		let ack: Acceptable;
+		loop {
+			match receiver.recv().await {
+				Ok(value) if value.id.event == Some(event_id.clone()) => match value.event {
+					WrapEvent::Session(Event::OpenAck(the_ack)) => {
+						ack = the_ack;
+						break;
+					},
+					_ => continue
+				},
+				_ => continue
+			}
+		}
+
+		if let Acceptable::Reject(reason) = ack {
+			return;
+		}
+
+		match self.mode {
+			LinkMode::Server => todo!(),
+			LinkMode::Client => todo!(),
 		}
 	}
 }
@@ -104,7 +154,7 @@ async fn io_handler(io: Arc<dyn LinkIO>, channel: InnerChannel, mut io_receiver:
 	let writter_stream_id = AtomicPoll::new();
 
 	// 处理 Reader
-	async fn wrap_reader(reader: Arc<dyn ReaderStream>, context: InnerContext, channel: InnerChannel) {
+	async fn wrap_reader(reader: Arc<dyn ReaderStream>, channel: InnerChannel) {
 		loop {
 			let buffer = match reader.read().await {
 				Ok(buffer) => Bytes::copy_from_slice(&buffer),
@@ -154,12 +204,12 @@ async fn io_handler(io: Arc<dyn LinkIO>, channel: InnerChannel, mut io_receiver:
 					writter_streams.insert(writter_stream_id.get_and_increase(), writter);
 
 					let reader = stream.clone() as Arc<dyn ReaderStream>;
-					context.runtime.spawn_local(wrap_reader(reader, context.clone(), (&channel).clone()));
+					context.runtime.spawn_local(wrap_reader(reader, (&channel).clone()));
 				}
 			},
 			try_uni_stream = io.accept_uni_stream() => {
 				if let Ok(reader) = try_uni_stream {
-					context.runtime.spawn_local(wrap_reader(reader, context.clone(), (&channel).clone()));
+					context.runtime.spawn_local(wrap_reader(reader, (&channel).clone()));
 				}
 			},
 			try_buffer = io_receiver.recv() => {
@@ -225,6 +275,8 @@ async fn link_handler(channel: InnerChannel, io_sender: mpsc::UnboundedSender<By
 				continue;
 			}
 		};
+
+		let id = data.id;
 
 		use channel::link::Event::*;
 		match event {

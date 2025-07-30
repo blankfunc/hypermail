@@ -2,7 +2,7 @@ use ibig::UBig;
 use once_cell::sync::Lazy;
 use forever_safer::atomic_poll::AtomicPoll;
 
-use crate::{core::packet::channel::session, protocol};
+use crate::protocol;
 
 pub mod channel {
 	use ibig::UBig;
@@ -132,7 +132,6 @@ pub mod channel {
 	// 包内所包含的所有 ID
 	#[derive(Clone, Builder)]
 	pub struct IdSet {
-		pub link: u64,
 		pub event: Option<UBig>,
 		pub session: Option<UBig>,
 		pub stream: Option<UBig>,
@@ -181,7 +180,6 @@ pub fn handle_flatbuffer<'a>(packet: crate::protocol::packet::Packet<'a>, link_i
 		let stream_id = quickly_ubig(packet_id.stream_id_as_value_ubig());
 
 		let try_id_set = channel::IdSetBuilder::default()
-			.link(link_id)
 			.event(event_id)
 			.session(session_id)
 			.stream(stream_id)
@@ -459,20 +457,22 @@ pub fn handle_flatbuffer<'a>(packet: crate::protocol::packet::Packet<'a>, link_i
 const EVENT_ID: Lazy<AtomicPoll> = Lazy::new(|| AtomicPoll::new());
 const U64_MAX: Lazy<UBig> = Lazy::new(|| UBig::from(u64::MAX));
 
+pub fn get_event_id() -> UBig {
+	EVENT_ID.get_and_increase()
+}
+
 pub fn serialize_datagram<'a>(builder: &mut flatbuffers::FlatBufferBuilder<'a>, data: self::channel::Datagram) -> flatbuffers::WIPOffset<protocol::packet::Packet<'a>> {
 	use flatbuffers::{FlatBufferBuilder, WIPOffset, UnionWIPOffset, Vector};
 
 	let id = {
-		let link_id = data.id.link;
 		let event_id = match data.id.event {
 			Some(id) => id,
-			None => EVENT_ID.get_and_increase()
+			None => get_event_id()
 		};
 		let session_id = data.id.session;
 		let stream_id = data.id.stream;
 
 		self::channel::IdSet {
-			link: link_id,
 			event: Some(event_id),
 			session: session_id,
 			stream: stream_id
@@ -793,7 +793,7 @@ pub fn serialize_datagram<'a>(builder: &mut flatbuffers::FlatBufferBuilder<'a>, 
 		let (stream_id_type, stream_id) = impl_id(builder, id.stream);
 
 		let mut packet_id_builder = PacketIdBuilder::new(builder);
-		packet_id_builder.add_link_id(id.link);
+		// packet_id_builder.add_link_id(id.link);
 		
 		macro_rules! impl_id {
 			($name:ident) => {

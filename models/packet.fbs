@@ -13,7 +13,6 @@ union Id {
 }
 
 table PacketId {
-	link_id: uint64;
 	event_id: Id;
 	session_id: Id;
 	stream_id: Id;
