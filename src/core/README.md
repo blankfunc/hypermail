@@ -20,6 +20,23 @@ As you can see:
 + `Link` is the **logical center** where decisions regarding connection disconnections, packet timeouts, and heartbeat packets are made. Simultaneously responsible for serializing data packets transmitted from lower layers, and then passing binary data to `IO`.
 + `Session` and `Stream` are both project definitions, with the former only used for identification and the latter used for transmitting stream data.
 
+In the design, a total of 4 handshakes are required from the beginning of the connection to sending data.
+
+```
+Client> SessionOpen
+Server> SessionOpenAck
+Client> StreamOpen
+Server> StreamOpenAck
+```
+
+Of course, not using streaming messages would be faster.
+
+```
+Client> SessionOpen
+Server> SessionOpenAck
+Client> StreamBlock
+```
+
 ## Protocol
 
 ### Session
@@ -33,8 +50,6 @@ As you can see:
 | `Close` | Request to close the session |
 | `CloseAck` | Response indicating readiness to close the session |
 | `Death` | Forcefully terminate the session |
-
----
 
 ### Stream
 
@@ -55,13 +70,9 @@ As you can see:
 | `Go`        | Request to continue sending                                |
 | `Clear`     | Abnormally terminate the stream                            |
 
----
-
 ### Health
 
 | Name         | Description                         |
 | ------------ | ----------------------------------- |
 | `Ping` | Client heartbeat packet             |
 | `Pong` | Server response to heartbeat packet |
-
----
